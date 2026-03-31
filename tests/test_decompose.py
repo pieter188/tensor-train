@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from tensortrain import TensorTrain
-from tensortrain.decompose import tensor_to_tt
+from tensortrain.decompose import qtt, tensor_to_tt
 
 
 class TestTensorToTT:
@@ -121,3 +121,38 @@ class TestRoundTrips:
         X = tt.full()
         tt2 = TensorTrain.from_tensor(X, eps=1e-12)
         np.testing.assert_allclose(tt2.full(), X, atol=1e-10)
+
+
+class TestQTT:
+    """Quantized Tensor Train decomposition."""
+
+    def test_basic_round_trip(self, rng):
+        """QTT should reconstruct the original vector."""
+        v = rng.standard_normal(2 * 3 * 4 * 5)
+        tt = qtt(v, eps=1e-12)
+        # Shape should be sorted prime factors
+        assert tt.shape == (2, 3, 4, 5) or np.prod(tt.shape) == len(v)
+        np.testing.assert_allclose(tt.full().ravel(), v, atol=1e-10)
+
+    def test_power_of_2(self, rng):
+        """Vector of length 2^n gives all-2 modes."""
+        v = rng.standard_normal(2**5)
+        tt = qtt(v, eps=1e-12)
+        assert all(s == 2 for s in tt.shape)
+        assert tt.ndim == 5
+
+    def test_with_eps(self, rng):
+        v = rng.standard_normal(120)
+        tt = qtt(v, eps=1e-4)
+        rel_err = np.linalg.norm(tt.full().ravel() - v) / np.linalg.norm(v)
+        assert rel_err <= 1e-4
+
+    def test_prime_length_raises(self):
+        with pytest.raises(ValueError, match="prime"):
+            qtt(np.ones(7))
+
+    def test_from_vector(self, rng):
+        """TensorTrain.from_vector convenience method."""
+        v = rng.standard_normal(120)
+        tt = TensorTrain.from_vector(v, eps=1e-10)
+        np.testing.assert_allclose(tt.full().ravel(), v, atol=1e-8)

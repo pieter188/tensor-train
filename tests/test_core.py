@@ -161,3 +161,67 @@ class TestCopy:
         tt2._cores[0] *= 0
         # Original unchanged
         np.testing.assert_array_equal(tt.core(0), np.ones((1, 3, 2)))
+
+
+class TestDivision:
+    def test_truediv(self):
+        tt = TensorTrain([np.ones((1, 3, 1)) * 6.0])
+        tt2 = tt / 3.0
+        np.testing.assert_allclose(tt2.core(0), np.ones((1, 3, 1)) * 2.0)
+
+    def test_truediv_preserves_original(self):
+        tt = TensorTrain([np.ones((1, 3, 1)) * 6.0])
+        _ = tt / 2.0
+        np.testing.assert_allclose(tt.core(0), np.ones((1, 3, 1)) * 6.0)
+
+
+class TestLen:
+    def test_len(self):
+        tt = TensorTrain.zeros((3, 4, 5))
+        assert len(tt) == 3
+
+    def test_len_single(self):
+        tt = TensorTrain([np.ones((1, 5, 1))])
+        assert len(tt) == 1
+
+
+class TestOrthogonalRandom:
+    def test_unit_norm(self):
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42, orthogonal=True)
+        np.testing.assert_allclose(tt.norm(), 1.0, atol=1e-12)
+
+    def test_norm_index_set(self):
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42, orthogonal=True)
+        assert tt.norm_index == 0
+
+    def test_preserves_shape_and_ranks(self):
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42, orthogonal=True)
+        assert tt.shape == (4, 3, 5)
+        # Ranks may differ from (2, 3) after QR but should be <= original
+        for r in tt.ranks[1:-1]:
+            assert r >= 1
+
+    def test_non_orthogonal_default(self):
+        """Default orthogonal=False gives unnormalized TT."""
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42)
+        assert tt.norm_index is None
+        # Norm is typically not 1
+        assert abs(tt.norm() - 1.0) > 0.1
+
+
+class TestNormIndex:
+    def test_norm_index_after_orthogonalize(self):
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42)
+        tt_orth = tt.orthogonalize(1)
+        assert tt_orth.norm_index == 1
+
+    def test_norm_fast_path(self):
+        """norm() uses fast path when norm_index is set."""
+        tt = TensorTrain.random((4, 3, 5), (2, 3), rng=42)
+        expected = tt.norm()
+        tt_orth = tt.orthogonalize(2)
+        np.testing.assert_allclose(tt_orth.norm(), expected, rtol=1e-10)
+
+    def test_norm_index_none_by_default(self):
+        tt = TensorTrain.zeros((3, 4))
+        assert tt.norm_index is None

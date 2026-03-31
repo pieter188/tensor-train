@@ -98,16 +98,17 @@ def sub(a: TensorTrain, b: TensorTrain) -> TensorTrain:
     return add(a, -b)
 
 
-def dot(a: TensorTrain, b: TensorTrain) -> float:
-    """Inner product of two tensor trains: ``<A, B>``.
+def dot(a: TensorTrain, b) -> float:
+    """Inner product ``<A, B>`` where *B* can be a TensorTrain or dense array.
 
-    Computed by contracting corresponding cores left-to-right without
-    forming the full tensors.
+    When *b* is an ``ndarray``, it is contracted directly with the TT
+    cores of *a* without first decomposing it into TT format.
 
     Parameters
     ----------
-    a, b : TensorTrain
-        Must have the same mode sizes.
+    a : TensorTrain
+    b : TensorTrain or ndarray
+        Must have the same shape as *a*.
 
     Returns
     -------
@@ -116,37 +117,36 @@ def dot(a: TensorTrain, b: TensorTrain) -> float:
 
     Notes
     -----
-    At each step *k*, we maintain a matrix ``M`` of shape
-    ``(ra_k, rb_k)`` that accumulates the partial contraction over
-    modes ``0, 1, ..., k-1``.  The contraction over mode *k* is:
-
-    .. math::
-
-        M'[\\alpha', \\beta'] = \\sum_{\\alpha, i_k, \\beta}
-        M[\\alpha, \\beta] \\, A^{(k)}[\\alpha, i_k, \\alpha']
-        \\, B^{(k)}[\\beta, i_k, \\beta']
+    For TT-TT: contracts corresponding cores left-to-right.
+    For TT-dense: contracts TT cores with the dense tensor directly.
 
     References
     ----------
     .. [1] I. V. Oseledets, "Tensor-Train Decomposition", *SIAM J. Sci.
        Comput.*, 33(5), 2295-2317, 2011.
     """
+    if isinstance(b, np.ndarray):
+        return _dot_tt_dense(a, b)
+
     check_compatible(a, b)
 
-    # Initialize: M has shape (1, 1) = [[1]]
     M = np.ones((1, 1))
-
     for k in range(a.ndim):
-        ca = a.core(k)  # (ra_l, n_k, ra_r)
-        cb = b.core(k)  # (rb_l, n_k, rb_r)
-
-        # Contract M with ca and cb over the left ranks and mode index
-        # M[alpha, beta] * ca[alpha, i, alpha'] * cb[beta, i, beta']
-        # = sum over alpha, beta, i
-        # Result shape: (ra_r, rb_r)
+        ca = a.core(k)
+        cb = b.core(k)
         M = np.einsum("ab,aic,bid->cd", M, ca, cb)
 
     return float(M.item())
+
+
+def _dot_tt_dense(a: TensorTrain, b: np.ndarray) -> float:
+    """Inner product of a TensorTrain with a dense tensor."""
+    b = np.asarray(b, dtype=np.float64)
+    if b.shape != a.shape:
+        raise ValueError(
+            f"Shape mismatch: TT shape {a.shape} vs array shape {b.shape}."
+        )
+    return float(np.sum(a.full() * b))
 
 
 # ======================================================================
@@ -295,3 +295,72 @@ def add_ttm(a: TTMatrix, b: TTMatrix) -> TTMatrix:
 def sub_ttm(a: TTMatrix, b: TTMatrix) -> TTMatrix:
     """Subtract two TTMatrices: ``C = A - B``."""
     return add_ttm(a, -b)
+
+
+def concat_ttm(a: TTMatrix, b: TTMatrix) -> TTMatrix:
+    """Block-column concatenation ``[A | B]`` of two TTMatrices.
+
+    Both matrices must have the same ``row_shape``. The last column
+    mode is doubled: if ``a.col_shape = (..., n_d)`` then the result
+    has ``col_shape = (..., 2 * n_d)``.
+
+    Parameters
+    ----------
+    a, b : TTMatrix
+        Must have the same ``row_shape`` and ``col_shape``.
+
+    Returns
+    -------
+    TTMatrix
+        Concatenation with doubled last column mode.
+
+    Notes
+    -----
+    Implements the algorithm from ``concatTTm.m``:
+    expand last core's column mode with ``[1, 0]`` / ``[0, 1]``
+    padding, convert to TT, add, convert back.
+    """
+    from tensortrain._matrix import TTMatrix
+    from tensortrain.convert import tt_to_ttm, ttm_to_tt
+
+    if a.row_shape != b.row_shape:
+        raise ValueError(
+            f"row_shape mismatch: {a.row_shape} vs {b.row_shape}."
+        )
+    if a.col_shape != b.col_shape:
+        raise ValueError(
+            f"col_shape mismatch: {a.col_shape} vs {b.col_shape}."
+        )
+
+    d = a.ndim
+
+    # --- Build [A 0]: expand last core's col mode with zero padding ---
+    a_cores = [c.copy() for c in a._cores]
+    last = a_cores[d - 1]  # (r_l, m_d, n_d, r_r)
+    r_l, m_d, n_d, r_r = last.shape
+    # Pad with zeros along column mode: (r_l, m_d, 2*n_d, r_r)
+    padded = np.zeros((r_l, m_d, 2 * n_d, r_r))
+    padded[:, :, :n_d, :] = last  # A in first half
+    a_cores[d - 1] = padded
+
+    # --- Build [0 B]: expand last core's col mode with zero padding ---
+    b_cores = [c.copy() for c in b._cores]
+    last = b_cores[d - 1]
+    r_l, m_d, n_d, r_r = last.shape
+    padded = np.zeros((r_l, m_d, 2 * n_d, r_r))
+    padded[:, :, n_d:, :] = last  # B in second half
+    b_cores[d - 1] = padded
+
+    # Convert to TT and add
+    a_ttm = TTMatrix(a_cores)
+    b_ttm = TTMatrix(b_cores)
+    a_tt = ttm_to_tt(a_ttm)
+    b_tt = ttm_to_tt(b_ttm)
+
+    from tensortrain.arithmetic import add
+    c_tt = add(a_tt, b_tt)
+
+    # Build new col_shape with doubled last mode
+    new_col_shape = a.col_shape[:-1] + (a.col_shape[-1] * 2,)
+
+    return tt_to_ttm(c_tt, a.row_shape, new_col_shape)

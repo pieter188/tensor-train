@@ -132,6 +132,27 @@ class TTMatrix:
         """Alias for :meth:`transpose`."""
         return self.transpose()
 
+    def column(self, index: int) -> TensorTrain:
+        """Extract column *index* as a TensorTrain vector.
+
+        Parameters
+        ----------
+        index : int
+            Column index (0-indexed).
+
+        Returns
+        -------
+        TensorTrain
+            Vector with shape ``self.row_shape``.
+
+        See Also
+        --------
+        tensortrain.convert.extract_column
+        """
+        from tensortrain.convert import extract_column
+
+        return extract_column(self, index)
+
     def to_tt(self) -> TensorTrain:
         """Convert to a TensorTrain by merging row/col modes.
 
@@ -230,6 +251,12 @@ class TTMatrix:
 
     def __rmul__(self, scalar: float) -> TTMatrix:
         return self.__mul__(scalar)
+
+    def __truediv__(self, scalar: float) -> TTMatrix:
+        return self * (1.0 / float(scalar))
+
+    def __len__(self) -> int:
+        return self.ndim
 
     # ------------------------------------------------------------------
     # Constructors

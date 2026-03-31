@@ -37,16 +37,18 @@ from tensortrain._core import TensorTrain
 from tensortrain._matrix import TTMatrix
 
 # Decomposition
-from tensortrain.decompose import matrix_to_ttm, tensor_to_tt
+from tensortrain.decompose import matrix_to_ttm, qtt, tensor_to_tt
 
 # Arithmetic
-from tensortrain.arithmetic import add, dot, matmat, matvec, sub
+from tensortrain.arithmetic import add, concat_ttm, dot, matmat, matvec, sub
 
 # Rounding
 from tensortrain.rounding import tt_round, tt_round_to_ranks
 
 # Conversion
 from tensortrain.convert import (
+    combine_tt_vectors,
+    extract_column,
     transpose_ttm,
     tt_to_full,
     tt_to_ttm,
@@ -58,7 +60,7 @@ from tensortrain.convert import (
 from tensortrain.canonical import orthogonalize
 
 # Linear algebra
-from tensortrain.linalg import hosvd
+from tensortrain.linalg import gram_schmidt_tt, hosvd
 
 __all__ = [
     # Classes
@@ -67,6 +69,7 @@ __all__ = [
     # Decomposition
     "tensor_to_tt",
     "matrix_to_ttm",
+    "qtt",
     # Arithmetic
     "add",
     "sub",

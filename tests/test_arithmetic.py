@@ -3,8 +3,10 @@
 import numpy as np
 import pytest
 
-from tensortrain import TensorTrain
-from tensortrain.arithmetic import add, dot, sub
+from tensortrain import TensorTrain, TTMatrix
+from tensortrain.arithmetic import add, concat_ttm, dot, sub
+from tensortrain.convert import extract_column
+from tensortrain.decompose import matrix_to_ttm
 
 
 class TestAdd:
@@ -111,6 +113,19 @@ class TestDot:
         with pytest.raises(ValueError, match="Incompatible"):
             dot(a, b)
 
+    def test_dot_with_dense_array(self):
+        """dot(tt, ndarray) should work."""
+        a = TensorTrain.random((4, 3, 5), (2, 3), rng=0)
+        b_dense = np.random.randn(4, 3, 5)
+        result = dot(a, b_dense)
+        expected = np.sum(a.full() * b_dense)
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_dot_dense_shape_mismatch(self):
+        a = TensorTrain.random((3, 4), (2,), rng=0)
+        with pytest.raises(ValueError, match="Shape mismatch"):
+            dot(a, np.zeros((3, 5)))
+
 
 class TestRoundingWithAdd:
     """Test that rounding works after addition (cross-phase test)."""
@@ -127,3 +142,67 @@ class TestRoundingWithAdd:
         # Rounded should have smaller or equal ranks
         for r_orig, r_round in zip(c.ranks, c_rounded.ranks):
             assert r_round <= r_orig
+
+
+class TestConcatTTm:
+    """Block-column concatenation [A | B]."""
+
+    def test_concat_shape(self):
+        """Last col mode should be doubled."""
+        I = TTMatrix.eye((3, 4))
+        C = concat_ttm(I, I)
+        assert C.row_shape == (3, 4)
+        assert C.col_shape == (3, 8)
+
+    def test_concat_columns_first_half_is_A(self, rng):
+        """First N columns of [A|B] should be A's columns."""
+        A = rng.standard_normal((6, 10))
+        B = rng.standard_normal((6, 10))
+        A_ttm = matrix_to_ttm(A, row_shape=(2, 3), col_shape=(2, 5))
+        B_ttm = matrix_to_ttm(B, row_shape=(2, 3), col_shape=(2, 5))
+        C_ttm = concat_ttm(A_ttm, B_ttm)
+
+        # Columns of A: last mode index 0..4 (first half)
+        # Columns of B: last mode index 5..9 (second half)
+        # Column (j1, j2) in C: j2 < 5 → A column (j1, j2)
+        #                        j2 >= 5 → B column (j1, j2-5)
+        n_cols_A = 10  # prod(col_shape) of A
+        col_shape_C = C_ttm.col_shape  # (2, 10)
+        n_d = A_ttm.col_shape[-1]  # 5
+
+        for flat_a in range(n_cols_A):
+            # Map A's flat column index to multi-index in A's col_shape
+            j1 = flat_a // 5
+            j2 = flat_a % 5
+            # In C, same (j1, j2) → flat = j1 * 10 + j2
+            flat_c = j1 * 10 + j2
+            col_c = extract_column(C_ttm, flat_c)
+            col_a = extract_column(A_ttm, flat_a)
+            np.testing.assert_allclose(
+                col_c.full(), col_a.full(), atol=1e-10
+            )
+
+    def test_concat_columns_second_half_is_B(self, rng):
+        """Second N columns of [A|B] should be B's columns."""
+        A = rng.standard_normal((6, 10))
+        B = rng.standard_normal((6, 10))
+        A_ttm = matrix_to_ttm(A, row_shape=(2, 3), col_shape=(2, 5))
+        B_ttm = matrix_to_ttm(B, row_shape=(2, 3), col_shape=(2, 5))
+        C_ttm = concat_ttm(A_ttm, B_ttm)
+
+        n_d = A_ttm.col_shape[-1]  # 5
+        for flat_b in range(10):
+            j1 = flat_b // 5
+            j2 = flat_b % 5
+            flat_c = j1 * 10 + (j2 + n_d)
+            col_c = extract_column(C_ttm, flat_c)
+            col_b = extract_column(B_ttm, flat_b)
+            np.testing.assert_allclose(
+                col_c.full(), col_b.full(), atol=1e-10
+            )
+
+    def test_mismatched_row_shape(self):
+        A = TTMatrix.eye((3, 4))
+        B = TTMatrix.eye((2, 6))
+        with pytest.raises(ValueError, match="row_shape"):
+            concat_ttm(A, B)

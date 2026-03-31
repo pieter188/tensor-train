@@ -57,6 +57,7 @@ class TensorTrain:
 
     def __init__(self, cores: Sequence[np.ndarray]) -> None:
         self._cores = validate_cores(list(cores))
+        self._norm_index: int | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -81,6 +82,15 @@ class TensorTrain:
     def size(self) -> int:
         """Total number of stored floating-point elements across all cores."""
         return sum(c.size for c in self._cores)
+
+    @property
+    def norm_index(self) -> int | None:
+        """Core index where the norm is concentrated, or ``None`` if unknown.
+
+        Set after :meth:`orthogonalize`.  When known, :meth:`norm` uses
+        this for an O(1) computation instead of a full inner product.
+        """
+        return self._norm_index
 
     @property
     def cores(self) -> list[np.ndarray]:
@@ -159,6 +169,9 @@ class TensorTrain:
     def norm(self) -> float:
         """Frobenius norm computed efficiently in TT format.
 
+        When :attr:`norm_index` is set (after orthogonalization), this
+        is an O(1) operation.  Otherwise computes via inner product.
+
         Returns
         -------
         float
@@ -167,6 +180,9 @@ class TensorTrain:
         --------
         tensortrain.arithmetic.dot
         """
+        if self._norm_index is not None:
+            return float(np.linalg.norm(self._cores[self._norm_index]))
+
         from tensortrain.arithmetic import dot
 
         return float(np.sqrt(dot(self, self)))
@@ -212,7 +228,9 @@ class TensorTrain:
 
     def copy(self) -> TensorTrain:
         """Return a deep copy."""
-        return TensorTrain([c.copy() for c in self._cores])
+        result = TensorTrain([c.copy() for c in self._cores])
+        result._norm_index = self._norm_index
+        return result
 
     # ------------------------------------------------------------------
     # Constructors (class methods)
@@ -283,11 +301,45 @@ class TensorTrain:
         return cls(cores)
 
     @classmethod
+    def from_vector(
+        cls,
+        vector: np.ndarray,
+        eps: float | None = None,
+        max_ranks: Sequence[int] | None = None,
+    ) -> TensorTrain:
+        """Decompose a vector into QTT (Quantized Tensor Train) format.
+
+        Automatically factorizes the vector length into prime factors and
+        reshapes the vector into a tensor before applying TT-SVD.
+
+        Parameters
+        ----------
+        vector : ndarray
+            A 1-D array.
+        eps : float, optional
+            Relative Frobenius-norm tolerance.
+        max_ranks : sequence of int, optional
+            Maximum TT-ranks.
+
+        Returns
+        -------
+        TensorTrain
+
+        See Also
+        --------
+        tensortrain.decompose.qtt
+        """
+        from tensortrain.decompose import qtt
+
+        return qtt(vector, eps=eps, max_ranks=max_ranks)
+
+    @classmethod
     def random(
         cls,
         shape: Sequence[int],
         ranks: Sequence[int],
         rng: np.random.Generator | int | None = None,
+        orthogonal: bool = False,
     ) -> TensorTrain:
         """Random TT with specified mode sizes and ranks.
 
@@ -299,6 +351,8 @@ class TensorTrain:
             Internal ranks ``(r_1, ..., r_{d-1})``.  Length must be ``d - 1``.
         rng : Generator, int, or None
             NumPy random generator or seed.
+        orthogonal : bool, optional
+            If True, orthogonalize cores and normalize to unit norm.
 
         Returns
         -------
@@ -321,7 +375,15 @@ class TensorTrain:
             rng.standard_normal((full_ranks[k], shape[k], full_ranks[k + 1]))
             for k in range(d)
         ]
-        return cls(cores)
+        tt = cls(cores)
+        if orthogonal:
+            tt = tt.orthogonalize(0)
+            # Normalize to unit Frobenius norm
+            n = float(np.linalg.norm(tt._cores[0]))
+            if n > 0:
+                tt._cores[0] = tt._cores[0] / n
+                tt._norm_index = 0
+        return tt
 
     # ------------------------------------------------------------------
     # Operator overloads
@@ -354,6 +416,12 @@ class TensorTrain:
 
     def __rmul__(self, scalar: float) -> TensorTrain:
         return self.__mul__(scalar)
+
+    def __truediv__(self, scalar: float) -> TensorTrain:
+        return self * (1.0 / float(scalar))
+
+    def __len__(self) -> int:
+        return self.ndim
 
     # ------------------------------------------------------------------
     # Representation

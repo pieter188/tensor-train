@@ -79,4 +79,6 @@ def orthogonalize(tt: TensorTrain, site: int) -> TensorTrain:
         # Contract last axis of cores[k-1] (r_left) with first axis of R.T
         cores[k - 1] = np.einsum("ijk,kl->ijl", cores[k - 1], R.T)
 
-    return TensorTrain(cores)
+    result = TensorTrain(cores)
+    result._norm_index = site
+    return result

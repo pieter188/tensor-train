@@ -241,6 +241,166 @@ def transpose_ttm(ttm: TTMatrix) -> TTMatrix:
     return TTMatrix(cores)
 
 
+def extract_column(ttm: TTMatrix, col_index: int) -> TensorTrain:
+    """Extract a column from a TTMatrix as a TensorTrain vector.
+
+    The column is selected by contracting each core's column mode with
+    the appropriate one-hot vector derived from the column multi-index.
+
+    Parameters
+    ----------
+    ttm : TTMatrix
+        The matrix to extract from.
+    col_index : int
+        Column index (0-indexed, in range ``[0, prod(col_shape))``).
+
+    Returns
+    -------
+    TensorTrain
+        A vector with shape ``ttm.row_shape``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from tensortrain import TTMatrix
+    >>> ttm = TTMatrix.eye((3, 4))
+    >>> col = ttm.column(0)
+    >>> col.full().ravel()[:4]
+    array([1., 0., 0., 0.])
+    """
+    from tensortrain._core import TensorTrain
+    from tensortrain.utils import multi_index as _multi_index
+
+    col_shape = ttm.col_shape
+    total_cols = int(np.prod(col_shape))
+    if not 0 <= col_index < total_cols:
+        raise ValueError(
+            f"col_index must be in [0, {total_cols}), got {col_index}."
+        )
+
+    # Get the multi-index for this column
+    midx = _multi_index(col_shape, col_index)
+
+    cores = []
+    for k in range(ttm.ndim):
+        # Core shape: (r_left, m_k, n_k, r_right)
+        core_4d = ttm.core(k)
+        # Select the midx[k]-th slice along the column mode (axis 2)
+        # Result: (r_left, m_k, r_right)
+        cores.append(core_4d[:, :, midx[k], :].copy())
+
+    return TensorTrain(cores)
+
+
+def combine_tt_vectors(
+    vectors: list[TensorTrain],
+    col_shape: tuple[int, ...],
+    eps: float = 1e-4,
+    max_rank: int = 5,
+) -> TTMatrix:
+    """Combine a list of TT vectors into a TTMatrix.
+
+    Each vector becomes a column of the resulting matrix. This is the
+    inverse of extracting all columns with :func:`extract_column`.
+
+    Parameters
+    ----------
+    vectors : list of TensorTrain
+        ``prod(col_shape)`` vectors, each with the same shape (the row shape).
+    col_shape : tuple of int
+        Column mode sizes for the resulting TTMatrix.
+    eps : float, optional
+        Rounding tolerance applied during accumulation to prevent rank
+        explosion.  Default ``1e-4``.
+    max_rank : int, optional
+        Maximum rank before rounding is triggered.  Default 5.
+
+    Returns
+    -------
+    TTMatrix
+
+    Notes
+    -----
+    This is an expensive operation — it builds each column as a sparse
+    TTm (via outer product with one-hot vectors), converts to TT, and
+    sums them all up with periodic rounding.
+    """
+    from tensortrain._core import TensorTrain
+    from tensortrain._fast import fast_round, max_rank as _max_rank
+    from tensortrain._matrix import TTMatrix
+    from tensortrain.utils import multi_index as _multi_index
+
+    n_cols = int(np.prod(col_shape))
+    if len(vectors) != n_cols:
+        raise ValueError(
+            f"Expected {n_cols} vectors for col_shape={col_shape}, "
+            f"got {len(vectors)}."
+        )
+
+    d = vectors[0].ndim
+    row_shape = vectors[0].shape
+
+    # Build each vector as raw TT cores (merged row/col), then sum
+    # using fast core-level operations with tree reduction
+    def _embed_vector(v, midx):
+        """Embed a TT vector into merged row*col TT cores via one-hot."""
+        cores = v._cores if hasattr(v, '_cores') else v
+        out = []
+        for k in range(d):
+            c = cores[k]
+            r_left, m_k, r_right = c.shape
+            n_k = col_shape[k]
+            # Sparse embedding: only the midx[k]-th column slice is nonzero
+            merged = np.zeros((r_left, m_k * n_k, r_right))
+            # Place data at column positions: row i maps to merged index i*n_k + midx[k]
+            for i in range(m_k):
+                merged[:, i * n_k + midx[k], :] = c[:, i, :]
+            out.append(merged)
+        return out
+
+    def _add_cores(a_cores, b_cores):
+        """Block-diagonal addition of two core lists."""
+        out = []
+        dd = len(a_cores)
+        for k in range(dd):
+            ca, cb = a_cores[k], b_cores[k]
+            ra_l, n_k, ra_r = ca.shape
+            rb_l, _, rb_r = cb.shape
+            if k == 0:
+                new = np.concatenate([ca, cb], axis=2)
+            elif k == dd - 1:
+                new = np.concatenate([ca, cb], axis=0)
+            else:
+                new = np.zeros((ra_l + rb_l, n_k, ra_r + rb_r))
+                new[:ra_l, :, :ra_r] = ca
+                new[ra_l:, :, ra_r:] = cb
+            out.append(new)
+        return out
+
+    # Build all embedded TT core lists
+    all_tts = []
+    for i in range(n_cols):
+        midx = _multi_index(col_shape, i)
+        all_tts.append(_embed_vector(vectors[i], midx))
+
+    # Tree reduction: pairwise addition with periodic rounding
+    while len(all_tts) > 1:
+        next_level = []
+        for i in range(0, len(all_tts), 2):
+            if i + 1 < len(all_tts):
+                merged = _add_cores(all_tts[i], all_tts[i + 1])
+            else:
+                merged = all_tts[i]
+            if _max_rank(merged) > max_rank:
+                merged = fast_round(merged, eps)
+            next_level.append(merged)
+        all_tts = next_level
+
+    tt_sum = TensorTrain(all_tts[0])
+
+    return tt_to_ttm(tt_sum, row_shape, col_shape)
+
+
 def vector_to_tensor(vector, shape):
     """Reshape a vector into a tensor.
 

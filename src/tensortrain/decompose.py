@@ -209,6 +209,80 @@ def matrix_to_ttm(
     return tt_to_ttm(tt, row_shape, col_shape)
 
 
+def qtt(
+    vector: np.ndarray,
+    eps: float | None = None,
+    max_ranks: Sequence[int] | None = None,
+) -> TensorTrain:
+    """Decompose a vector into Quantized Tensor Train (QTT) format.
+
+    Automatically factorizes the vector length into prime factors, reshapes
+    the vector into a tensor with those factor dimensions, and applies
+    TT-SVD.
+
+    Parameters
+    ----------
+    vector : ndarray
+        A 1-D array.  Its length must have at least two prime factors
+        (i.e., must not be prime itself).
+    eps : float, optional
+        Relative Frobenius-norm tolerance.
+    max_ranks : sequence of int, optional
+        Maximum TT-ranks.
+
+    Returns
+    -------
+    TensorTrain
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from tensortrain.decompose import qtt
+    >>> v = np.random.randn(2 * 3 * 4 * 5)
+    >>> tt = qtt(v, eps=1e-10)
+    >>> tt.shape
+    (2, 3, 4, 5)
+    """
+    from tensortrain._core import TensorTrain
+
+    vector = np.asarray(vector, dtype=np.float64).ravel()
+    n = len(vector)
+
+    factors = _prime_factors(n)
+    if len(factors) < 2:
+        raise ValueError(
+            f"Vector length {n} is prime — cannot form a multi-dimensional "
+            f"tensor.  QTT requires a composite length."
+        )
+
+    # Sort factors ascending for balanced core sizes
+    shape = tuple(sorted(factors))
+    tensor = vector.reshape(shape)
+    return tensor_to_tt(tensor, eps=eps, max_ranks=max_ranks)
+
+
+def _prime_factors(n: int) -> list[int]:
+    """Return the prime factorization of *n* as a sorted list.
+
+    Examples
+    --------
+    >>> _prime_factors(120)
+    [2, 2, 2, 3, 5]
+    >>> _prime_factors(7)
+    [7]
+    """
+    factors = []
+    d = 2
+    while d * d <= n:
+        while n % d == 0:
+            factors.append(d)
+            n //= d
+        d += 1
+    if n > 1:
+        factors.append(n)
+    return factors
+
+
 def _truncation_rank_eps(sigma: np.ndarray, delta: float) -> int:
     """Find the smallest rank *r* such that the truncation error is <= delta.
 
